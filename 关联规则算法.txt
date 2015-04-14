@@ -1,0 +1,52 @@
+create view distinct_trans as select distinct tranobject from purchase;
+
+create view all_trans as
+--可以用wm_concat函数
+SELECT tranid,MAX(tranobjects) tranobjects
+  FROM (select tranid,WMSYS.WM_CONCAT(tranobject) OVER(PARTITION BY tranid ORDER BY tranobject) tranobjects
+         from purchase
+       )
+group by tranid;
+--也可以用sys_connect_by_path函数
+create view all_trans as
+select tranid,substr(tranobjects,2) tranobjects from  --格式化前面的逗号和空格
+(
+  select distinct tranid,FIRST_VALUE(tranobjects) OVER(PARTITION BY tranid ORDER BY levels desc ) AS tranobjects  --保留最大的那个
+   from
+   (
+     select tranid,sys_connect_by_path(tranobject,',') tranobjects,level levels --各购买事务的内部排列组合
+       from purchase
+    connect by tranid=prior tranid and tranobject<prior tranobject
+   )
+);
+--对所有购买单元项进行排列组合，即数据挖掘的X^Y项
+create view all_zuhe as
+select substr(sys_connect_by_path(tranobject,','),2) zuhe
+  from (select distinct tranobject from purchase)
+connect by nocycle tranobject<prior tranobject;
+
+select * from all_zuhe
+--筛选出符合要求的排列组合，即数据挖掘的X项和Y项
+create view full_zuhe as
+select a.zuhe X,b.zuhe Y from all_zuhe a,all_zuhe b
+where instr(a.zuhe,b.zuhe)=0 and instr(b.zuhe,a.zuhe)=0
+ and not exists(select 1 from distinct_trans c
+                 where instr(a.zuhe,c.tranobject)>0 and instr(b.zuhe,c.tranobject)>0)
+ 
+select * from full_zuhe  
+ 
+create or replace view tongji as
+select xy,xy_total,x,x_total,y,y_total,transtotal from
+(
+  select y||','||x xy,
+         (select count(*) from all_trans a where instr(a.tranobjects,c.x||','||c.y)>0 or instr(a.tranobjects,c.y||','||c.x)>0) xy_total, --包含xy的事务数
+         y,
+         (select count(*) from all_trans b where instr(b.tranobjects,c.y)>0) y_total, --包含y的事务数
+         x,
+         (select count(*) from all_trans b where instr(b.tranobjects,c.x)>0) x_total, --包含x的事务数
+         d.transtotal  --总事务数
+   from full_zuhe c,(select count(distinct tranid) transtotal from purchase) d
+  order by xy_total desc,x_total desc
+)
+ 
+select * from tongji where xy_total>=3 and y_total>=3
